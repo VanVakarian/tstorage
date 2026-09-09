@@ -289,7 +289,27 @@ func (m *memoryMetric) selectPoints(start, end int64) []*DataPoint {
 
 // encodeAllPoints uses the given seriesEncoder to encode all metric data points in order by timestamp,
 // including outOfOrderPoints.
+//
+// Fork fix: this used to read (and, via the sort.Slice below, mutate)
+// points/outOfOrderPoints without holding m.mu at all, unlike insertPoint
+// (Lock) and selectPoints (RLock) — a plain missing lock, not a design
+// choice; nothing here suggested a partition being flushed could never also
+// still be receiving writes. It can: storage.flushPartitions only skips the
+// first writablePartitionsNum (2) partitions *as measured by the position a
+// given flush run's own iterator sees at the moment it runs* — a burst of
+// several ensureActiveHead-triggered rotations can push a partition that an
+// in-flight InsertRows call is still targeting (via the writablePartitionsNum
+// fallback loop, itself using a snapshot iterator taken earlier) past that
+// boundary before flushPartitions gets to it. Confirmed with `go test -race`
+// under a stress test (many concurrent writers, a few-millisecond partition
+// duration) — reliably reports a genuine data race without this lock. Not a
+// production concern at flatline's real write rate (about once a minute
+// against hour-plus partitions leaves no realistic window for it), but a
+// real bug in the library regardless of how rarely it's hit. See CHANGES.md.
 func (m *memoryMetric) encodeAllPoints(encoder seriesEncoder) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	sort.Slice(m.outOfOrderPoints, func(i, j int) bool {
 		return m.outOfOrderPoints[i].Timestamp < m.outOfOrderPoints[j].Timestamp
 	})

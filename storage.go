@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nakabonne/tstorage/internal/cgroup"
@@ -574,12 +575,18 @@ func (s *storage) flush(dirPath string, m *memoryPartition) error {
 			return false
 		}
 
-		totalNumPoints := mt.size + int64(len(mt.outOfOrderPoints))
+		// Fork fix: mt.size/minTimestamp/maxTimestamp are written with
+		// atomic.Store/AddInt64 by insertPoint (memory_partition.go) — a
+		// plain field read here raced against those writes under `go test
+		// -race` in the same stress scenario that exposed the missing lock
+		// in encodeAllPoints just above (see its comment). Read them the
+		// same way selectPoints does.
+		totalNumPoints := atomic.LoadInt64(&mt.size) + int64(len(mt.outOfOrderPoints))
 		metrics[mt.name] = diskMetric{
 			Name:          mt.name,
 			Offset:        offset,
-			MinTimestamp:  mt.minTimestamp,
-			MaxTimestamp:  mt.maxTimestamp,
+			MinTimestamp:  atomic.LoadInt64(&mt.minTimestamp),
+			MaxTimestamp:  atomic.LoadInt64(&mt.maxTimestamp),
 			NumDataPoints: totalNumPoints,
 		}
 		return true
