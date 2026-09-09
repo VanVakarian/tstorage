@@ -282,6 +282,11 @@ type storage struct {
 	workersLimitCh chan struct{}
 	// wg must be incremented to guarantee all writes are done gracefully.
 	wg sync.WaitGroup
+	// flushMu serializes background flushPartitions runs (see
+	// ensureActiveHead) — upstream let them fire off detached and
+	// overlapping, racing each other over the same partition list. See
+	// CHANGES.md.
+	flushMu sync.Mutex
 
 	doneCh chan struct{}
 }
@@ -370,10 +375,20 @@ func (s *storage) ensureActiveHead() error {
 	// upstream fired this detached, so Close (which only waits on s.wg)
 	// could return while a partition swap/flush was still in progress,
 	// racing against concurrent Select calls touching the same partition
-	// list. See CHANGES.md.
+	// list. flushMu additionally serializes overlapping runs of this
+	// goroutine itself: a burst of inserts can call ensureActiveHead many
+	// times in quick succession, each spawning its own flushPartitions —
+	// upstream let those run concurrently, unsynchronized against each
+	// other, which could corrupt the partition swap/flush sequence. Only
+	// one now actually runs flushPartitions at a time; the rest queue up
+	// on the lock and each still runs (flushPartitions is idempotent — it
+	// just finds nothing new to do if a queued-up predecessor already
+	// handled it). See CHANGES.md.
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
+		s.flushMu.Lock()
+		defer s.flushMu.Unlock()
 		if err := s.flushPartitions(); err != nil {
 			s.logger.Printf("failed to flush in-memory partitions: %v", err)
 		}
