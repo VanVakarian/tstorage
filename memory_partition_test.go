@@ -52,6 +52,29 @@ func Test_memoryPartition_InsertRows(t *testing.T) {
 				{Metric: "metric1", DataPoint: DataPoint{Timestamp: 1, Value: 0.1}},
 			},
 		},
+		{
+			// Fork-local regression test: overwriting an existing
+			// timestamp must replace the point in place, not disappear
+			// into outOfOrderPoints where selectDataPoints never looks
+			// while the partition stays in memory. See CHANGES.md.
+			name: "overwrite existing timestamp",
+			memoryPartition: func() *memoryPartition {
+				m := newMemoryPartition(nil, 0, "").(*memoryPartition)
+				m.insertRows([]Row{
+					{Metric: "metric1", DataPoint: DataPoint{Timestamp: 1, Value: 0.1}},
+					{Metric: "metric1", DataPoint: DataPoint{Timestamp: 2, Value: 0.1}},
+				})
+				return m
+			}(),
+			rows: []Row{
+				{Metric: "metric1", DataPoint: DataPoint{Timestamp: 2, Value: 0.9}},
+			},
+			wantDataPoints: []*DataPoint{
+				{Timestamp: 1, Value: 0.1},
+				{Timestamp: 2, Value: 0.9},
+			},
+			wantOutOfOrderRows: []Row{},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

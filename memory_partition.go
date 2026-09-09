@@ -208,6 +208,23 @@ func (m *memoryMetric) insertPoint(point *DataPoint) {
 		return
 	}
 
+	// A point whose timestamp already exists in points is an intentional
+	// overwrite (e.g. recomputing an aggregate once more data has arrived
+	// for its period), not a late-arriving new point — points is sorted, so
+	// a binary search finds it directly and replaces it in place instead of
+	// stashing a second copy in outOfOrderPoints, which selectPoints (the
+	// read path) never looks at while this partition stays in memory.
+	// Fork-local fix: upstream treats every non-increasing insert as "out
+	// of order" and never checks for an exact-timestamp match, so
+	// equal-timestamp overwrites were silently invisible to reads until the
+	// partition flushed to disk — and even then landed as a duplicate point
+	// rather than a replacement, since encodeAllPoints below just merges
+	// both slices by timestamp without deduplicating. See CHANGES.md.
+	if index := sort.Search(len(m.points), func(i int) bool { return m.points[i].Timestamp >= point.Timestamp }); index < len(m.points) && m.points[index].Timestamp == point.Timestamp {
+		m.points[index] = point
+		return
+	}
+
 	m.outOfOrderPoints = append(m.outOfOrderPoints, point)
 }
 
