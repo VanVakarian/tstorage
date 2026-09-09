@@ -52,6 +52,23 @@ func newMemoryPartition(wal wal, partitionDuration time.Duration, precision Time
 	}
 }
 
+// forceInsertRows is like insertRows but never bounces a row for being
+// older than this partition's own minT (whatever the first row ever
+// written to this partition instance happened to have — not a meaningful
+// boundary worth losing data over). Used as a last-resort fallback by
+// storage.InsertRows when no partition within the configured
+// writablePartitionsNum window accepted a backfilled row, instead of
+// silently dropping it — see CHANGES.md.
+func (m *memoryPartition) forceInsertRows(rows []Row) error {
+	for i := range rows {
+		if rows[i].Timestamp < m.minTimestamp() {
+			atomic.StoreInt64(&m.minT, rows[i].Timestamp)
+		}
+	}
+	_, err := m.insertRows(rows)
+	return err
+}
+
 // insertRows inserts the given rows to partition.
 func (m *memoryPartition) insertRows(rows []Row) ([]Row, error) {
 	if len(rows) == 0 {

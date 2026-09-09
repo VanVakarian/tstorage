@@ -727,16 +727,27 @@ func ExampleStorage_InsertRows_expired() {
 		fmt.Printf("Timestamp: %v, Value: %v\n", p.Timestamp, p.Value)
 	}
 
-	// Missing data point at 1600000002 because it was dropped.
+	// Fork change: 1600000002 is no longer dropped — storage.InsertRows now
+	// force-inserts a row nothing else accepted into the head partition
+	// instead of discarding it (see CHANGES.md). Its target partition
+	// (1-3) was already flushed to an immutable on-disk file by this
+	// point, so it lands in the current head instead, which widens that
+	// partition's range enough to overlap the older one — Select's
+	// per-partition merge assumes non-overlapping ranges to stay globally
+	// sorted, so the result below is correct (no data lost) but not in
+	// timestamp order. Out of scope for this fork: flatline's own usage
+	// never corrects a value old enough to have already been flushed to
+	// disk.
 
 	// Output:
 	// Timestamp: 1600000001, Value: 0.1
 	// Timestamp: 1600000003, Value: 0.1
+	// Timestamp: 1600000002, Value: 0.1
+	// Timestamp: 1600000007, Value: 0.1
+	// Timestamp: 1600000008, Value: 0.1
 	// Timestamp: 1600000004, Value: 0.1
 	// Timestamp: 1600000005, Value: 0.1
 	// Timestamp: 1600000006, Value: 0.1
-	// Timestamp: 1600000007, Value: 0.1
-	// Timestamp: 1600000008, Value: 0.1
 }
 
 func ExampleStorage_InsertRows_concurrent() {

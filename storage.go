@@ -299,8 +299,7 @@ func (s *storage) InsertRows(rows []Row) error {
 		n := s.partitionList.size()
 		rowsToInsert := rows
 		// Starting at the head partition, try to insert rows, and loop to insert outdated rows
-		// into older partitions. Any rows more than `writablePartitionsNum` partitions out
-		// of date are dropped.
+		// into older partitions.
 		for i := 0; i < n && i < writablePartitionsNum; i++ {
 			if len(rowsToInsert) == 0 {
 				break
@@ -313,6 +312,22 @@ func (s *storage) InsertRows(rows []Row) error {
 				return fmt.Errorf("failed to insert rows: %w", err)
 			}
 			rowsToInsert = outdatedRows
+		}
+		// Fork change: upstream silently dropped anything still left in
+		// rowsToInsert here ("any rows more than writablePartitionsNum
+		// partitions out of date are dropped") — a legitimate backfill for
+		// a period older than every partition currently willing to accept
+		// it (e.g. a restore recomputing a gap in a fresh store with only
+		// one partition so far) was lost with no error. Force it into the
+		// head partition instead — see forceInsertRows. See CHANGES.md.
+		if len(rowsToInsert) > 0 {
+			head, ok := s.partitionList.getHead().(*memoryPartition)
+			if !ok {
+				return fmt.Errorf("head partition is not writable")
+			}
+			if err := head.forceInsertRows(rowsToInsert); err != nil {
+				return fmt.Errorf("failed to force insert outdated rows: %w", err)
+			}
 		}
 		return nil
 	}

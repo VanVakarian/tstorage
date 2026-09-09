@@ -1,9 +1,9 @@
 # Fork changes
 
 This is a fork of [nakabonne/tstorage](https://github.com/nakabonne/tstorage) used by
-[flatline](https://github.com/VanVakarian/flatline). Only change on top of upstream:
+[flatline](https://github.com/VanVakarian/flatline). Changes on top of upstream:
 
-## Out-of-order and same-timestamp inserts now land in their correct sorted position
+## 1. Out-of-order and same-timestamp inserts now land in their correct sorted position
 
 Upstream's `memoryMetric.insertPoint` only ever appends: a point whose timestamp is
 greater than the last one goes onto the end of the sorted `points` slice; anything
@@ -23,12 +23,36 @@ right position, shifting later elements up. `outOfOrderPoints`/`encodeAllPoints`
 merge are left in place as dead-but-harmless code (nothing appends to
 `outOfOrderPoints` anymore) rather than removed, to keep the diff minimal.
 
-Out-of-scope on purpose: a value that needs correcting after its partition has
-already been flushed to an immutable on-disk file. That's a heavier problem (rewriting
-a read-only mmap'd file) and isn't hit by flatline's own usage.
-
 See `memory_partition.go`'s `insertPoint` for the change, `memory_partition_test.go`'s
 two new cases ("overwrite existing timestamp", "insert genuinely earlier point between
 existing ones") for the regression tests, and
 `storage_examples_test.go`'s `ExampleStorage_Select_from_memory_out_of_order` (updated
 to its corrected output).
+
+## 2. A row no partition accepts is no longer silently dropped
+
+`storage.InsertRows` tries a row against the head partition, then up to
+`writablePartitionsNum` (2) older ones; upstream's own comment said the quiet part out
+loud: "any rows more than writablePartitionsNum partitions out of date are dropped."
+A restore/backfill for a period older than every partition currently willing to accept
+it — a fresh store with only one (head) partition so far is enough to trigger this —
+lost the data with no error at all.
+
+This fork adds a last-resort fallback: if a row is still unaccepted after the normal
+attempts, `memoryPartition.forceInsertRows` inserts it into the head partition anyway,
+lowering that partition's tracked minimum timestamp to match instead of bouncing the
+row again. Trade-off, and it's a real one: if the row's rightful partition has already
+been flushed to an immutable on-disk file, force-inserting into the head widens the
+head's range enough to overlap that older, already-written file — `storage.Select`'s
+per-partition merge assumes partitions cover non-overlapping ranges to come back
+globally sorted by timestamp, so a value backfilled that late will still be present in
+full, just not necessarily returned in timestamp order. This case does not come up in
+flatline's own usage (nothing corrects a value old enough to have already been flushed
+to disk), so it's accepted as-is rather than fixed — a full fix would need a real
+merge in `Select` and isn't worth the complexity for a path nothing exercises.
+
+See `storage.go`'s `InsertRows` and `memory_partition.go`'s `forceInsertRows` for the
+change, and `storage_examples_test.go`'s `ExampleStorage_InsertRows_outdated` (now
+recovers the row cleanly, in order — it wasn't hitting the overlap case) and
+`ExampleStorage_InsertRows_expired` (does hit the overlap case, updated to its
+corrected-but-reordered output, with the trade-off spelled out in the comment).
