@@ -366,7 +366,14 @@ func (s *storage) ensureActiveHead() error {
 	if err := s.newPartition(nil, true); err != nil {
 		return err
 	}
+	// Fork change: tracked via s.wg like every other in-flight operation —
+	// upstream fired this detached, so Close (which only waits on s.wg)
+	// could return while a partition swap/flush was still in progress,
+	// racing against concurrent Select calls touching the same partition
+	// list. See CHANGES.md.
+	s.wg.Add(1)
 	go func() {
+		defer s.wg.Done()
 		if err := s.flushPartitions(); err != nil {
 			s.logger.Printf("failed to flush in-memory partitions: %v", err)
 		}
