@@ -468,8 +468,10 @@ func ExampleStorage_Select_from_disk() {
 	//Timestamp: 1600000049, Value: 0.2
 }
 
-// Out of order data points that are not yet flushed are in the buffer
-// but do not appear in select.
+// Fork change: out of order data points are now inserted into their sorted
+// position and appear in select immediately, even before the partition is
+// flushed to disk — see CHANGES.md. Upstream stashed them in a separate
+// buffer that select never looked at until flush.
 func ExampleStorage_Select_from_memory_out_of_order() {
 	storage, err := tstorage.NewStorage(
 		tstorage.WithTimestampPrecision(tstorage.Seconds),
@@ -499,10 +501,9 @@ func ExampleStorage_Select_from_memory_out_of_order() {
 		fmt.Printf("Timestamp: %v, Value: %v\n", p.Timestamp, p.Value)
 	}
 
-	// Out-of-order data points are ignored because they will get merged when flushing.
-
 	// Output:
 	// Timestamp: 1600000000, Value: 0.1
+	// Timestamp: 1600000001, Value: 0.1
 	// Timestamp: 1600000002, Value: 0.1
 	// Timestamp: 1600000003, Value: 0.1
 }

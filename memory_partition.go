@@ -208,24 +208,33 @@ func (m *memoryMetric) insertPoint(point *DataPoint) {
 		return
 	}
 
-	// A point whose timestamp already exists in points is an intentional
-	// overwrite (e.g. recomputing an aggregate once more data has arrived
-	// for its period), not a late-arriving new point — points is sorted, so
-	// a binary search finds it directly and replaces it in place instead of
-	// stashing a second copy in outOfOrderPoints, which selectPoints (the
-	// read path) never looks at while this partition stays in memory.
-	// Fork-local fix: upstream treats every non-increasing insert as "out
-	// of order" and never checks for an exact-timestamp match, so
-	// equal-timestamp overwrites were silently invisible to reads until the
-	// partition flushed to disk — and even then landed as a duplicate point
-	// rather than a replacement, since encodeAllPoints below just merges
-	// both slices by timestamp without deduplicating. See CHANGES.md.
-	if index := sort.Search(len(m.points), func(i int) bool { return m.points[i].Timestamp >= point.Timestamp }); index < len(m.points) && m.points[index].Timestamp == point.Timestamp {
+	// A point that isn't simply the newest one yet — either it repeats an
+	// existing timestamp (an intentional overwrite, e.g. recomputing an
+	// aggregate once more data has arrived for its period) or is genuinely
+	// a new, earlier point that arrived out of order (e.g. backfilled
+	// historical data) — is inserted directly into its sorted position in
+	// points, rather than stashed in outOfOrderPoints, which selectPoints
+	// (the read path) never looks at while this partition stays in memory.
+	// points is already sorted, so a binary search finds the right spot: an
+	// exact timestamp match replaces in place, anything else is inserted,
+	// shifting later elements up. Fork-local fix: upstream stashes every
+	// non-increasing insert in outOfOrderPoints and only ever reconciles it
+	// at flush time — and even then doesn't deduplicate an exact-timestamp
+	// overwrite, since encodeAllPoints just merges both slices by
+	// timestamp, leaving the old and new value as two separate points
+	// sharing the same timestamp forever. See CHANGES.md.
+	index := sort.Search(len(m.points), func(i int) bool { return m.points[i].Timestamp >= point.Timestamp })
+	if index < len(m.points) && m.points[index].Timestamp == point.Timestamp {
 		m.points[index] = point
 		return
 	}
-
-	m.outOfOrderPoints = append(m.outOfOrderPoints, point)
+	m.points = append(m.points, nil)
+	copy(m.points[index+1:], m.points[index:])
+	m.points[index] = point
+	atomic.AddInt64(&m.size, 1)
+	if point.Timestamp < atomic.LoadInt64(&m.minTimestamp) {
+		atomic.StoreInt64(&m.minTimestamp, point.Timestamp)
+	}
 }
 
 // selectPoints returns a new slice by re-slicing with [startIdx:endIdx].

@@ -75,6 +75,36 @@ func Test_memoryPartition_InsertRows(t *testing.T) {
 			},
 			wantOutOfOrderRows: []Row{},
 		},
+		{
+			// Fork-local regression test: a genuinely new but
+			// chronologically earlier point (e.g. backfilled historical
+			// data arriving after newer data already flowed through)
+			// must land in its correct sorted position, not disappear
+			// into outOfOrderPoints. See CHANGES.md.
+			// Uses the same fixed selectDataPoints(0, 4) window as every
+			// other case in this table (see below), so all points here
+			// stay inside [0, 4). Timestamp 0 itself is deliberately not
+			// used — it's a reserved sentinel meaning "use wall-clock now",
+			// not a literal zero (see insertRows' row.Timestamp == 0 check).
+			name: "insert genuinely earlier point between existing ones",
+			memoryPartition: func() *memoryPartition {
+				m := newMemoryPartition(nil, 0, "").(*memoryPartition)
+				m.insertRows([]Row{
+					{Metric: "metric1", DataPoint: DataPoint{Timestamp: 1, Value: 0.1}},
+					{Metric: "metric1", DataPoint: DataPoint{Timestamp: 3, Value: 0.1}},
+				})
+				return m
+			}(),
+			rows: []Row{
+				{Metric: "metric1", DataPoint: DataPoint{Timestamp: 2, Value: 0.1}},
+			},
+			wantDataPoints: []*DataPoint{
+				{Timestamp: 1, Value: 0.1},
+				{Timestamp: 2, Value: 0.1},
+				{Timestamp: 3, Value: 0.1},
+			},
+			wantOutOfOrderRows: []Row{},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
