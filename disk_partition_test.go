@@ -36,3 +36,16 @@ func TestOpenDiskPartition(t *testing.T) {
 		})
 	}
 }
+
+func TestDiskPartitionInsertRowsReturnsAllRowsAsOutdated(t *testing.T) {
+	d := &diskPartition{}
+	rows := []Row{
+		{Metric: "foo", DataPoint: DataPoint{Timestamp: 1, Value: 1}},
+		{Metric: "bar", DataPoint: DataPoint{Timestamp: 2, Value: 2}},
+	}
+
+	outdated, err := d.insertRows(rows)
+
+	assert.NoError(t, err)
+	assert.Equal(t, rows, outdated)
+}

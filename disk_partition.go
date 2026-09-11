@@ -105,8 +105,18 @@ func openDiskPartition(dirPath string, retention time.Duration) (partition, erro
 	}, nil
 }
 
-func (d *diskPartition) insertRows(_ []Row) ([]Row, error) {
-	return nil, fmt.Errorf("can't insert rows into disk partition")
+// insertRows never writes — a disk partition is read-only by construction
+// (see the partition lifecycle note at the top of partition.go). Per the
+// insertRows contract, "can't accept these" is reported by handing every row
+// back as outdatedRows, not by erroring: erroring here previously aborted
+// storage.InsertRows's whole writablePartitionsNum loop before it could
+// reach the "force outdated rows into head" fallback added in 1d84d49,
+// turning an ordinary "this batch includes a couple of stale rows" case
+// (e.g. a client replaying its backlog right after Storage restarts with a
+// brand new, still-empty head partition) into a hard failure of the entire
+// insert instead of a routine force-insert.
+func (d *diskPartition) insertRows(rows []Row) ([]Row, error) {
+	return rows, nil
 }
 
 func (d *diskPartition) selectDataPoints(metric string, labels []Label, start, end int64) ([]*DataPoint, error) {
