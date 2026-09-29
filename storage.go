@@ -238,7 +238,15 @@ func NewStorage(opts ...Option) (Storage, error) {
 		partitions = append(partitions, part)
 	}
 	sort.Slice(partitions, func(i, j int) bool {
-		return partitions[i].minTimestamp() < partitions[j].minTimestamp()
+		if partitions[i].minTimestamp() != partitions[j].minTimestamp() {
+			return partitions[i].minTimestamp() < partitions[j].minTimestamp()
+		}
+		// Fork change: equal starts (a correction for the very first point of a
+		// partition lands in a new partition with the same min) used to sort in
+		// undefined order, so the stale original could come last and win on
+		// duplicate timestamps. The later-created partition holds the later
+		// write and must sort last. See CHANGES.md.
+		return createdAt(partitions[i]).Before(createdAt(partitions[j]))
 	})
 	for _, p := range partitions {
 		s.newPartition(p, false)
@@ -418,8 +426,13 @@ func (s *storage) Select(metric string, labels []Label, start, end int64) ([]*Da
 			continue
 		}
 		if part.maxTimestamp() < start {
-			// No need to keep going anymore
-			break
+			// Fork change: upstream `break`s here, assuming partitions are
+			// ordered by max timestamp. Force-inserted late rows (see
+			// InsertRows) stretch a partition's range back over older ones,
+			// and on reload partitions are sorted by *min* timestamp — so an
+			// older-looking partition can hold the newest data, and breaking
+			// would silently hide it. Skip this partition only. See CHANGES.md.
+			continue
 		}
 		if part.minTimestamp() > end {
 			continue
@@ -657,4 +670,13 @@ func (s *storage) recoverWAL(walDir string) error {
 
 func (s *storage) inMemoryMode() bool {
 	return s.dataPath == ""
+}
+
+// createdAt is when a partition was flushed to disk; every partition read back
+// on startup is a disk partition and carries it in its meta file.
+func createdAt(p partition) time.Time {
+	if d, ok := p.(*diskPartition); ok {
+		return d.meta.CreatedAt
+	}
+	return time.Time{}
 }

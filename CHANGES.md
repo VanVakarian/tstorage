@@ -46,10 +46,14 @@ been flushed to an immutable on-disk file, force-inserting into the head widens 
 head's range enough to overlap that older, already-written file — `storage.Select`'s
 per-partition merge assumes partitions cover non-overlapping ranges to come back
 globally sorted by timestamp, so a value backfilled that late will still be present in
-full, just not necessarily returned in timestamp order. This case does not come up in
-flatline's own usage (nothing corrects a value old enough to have already been flushed
-to disk), so it's accepted as-is rather than fixed — a full fix would need a real
-merge in `Select` and isn't worth the complexity for a path nothing exercises.
+full, just not necessarily returned in timestamp order (callers sort; flatline's
+`selectRange` does). *Update:* this was first accepted as-is because nothing in
+flatline corrected a value old enough to have been flushed to disk. Flatline now
+does exactly that on purpose (the operator override route), and the overlap turned
+out to be worse than "unordered": after a restart it made `Select` skip the head and
+hide recent points (§5), and an equal-start tie made the stale original win on
+duplicate timestamps (§6). Both are fixed below; the result order is still not
+globally sorted.
 
 See `storage.go`'s `InsertRows` and `memory_partition.go`'s `forceInsertRows` for the
 change, and `storage_examples_test.go`'s `ExampleStorage_InsertRows_outdated` (now
@@ -115,3 +119,42 @@ bug in the library regardless of how rarely conditions line up to hit it.
 
 See `memory_partition.go`'s `encodeAllPoints` and `storage.go`'s `flush` for the
 change, and `flush_race_test.go` for the regression test.
+
+## 5. `Select` no longer stops at the first partition that ends before `start`
+
+Upstream's `Select` walks partitions newest-first and `break`s at the first one whose
+`maxTimestamp` is below `start`, assuming partitions are ordered by max timestamp.
+That assumption doesn't survive #2: a late correction for a point inside an already
+flushed partition is force-inserted into the head, which lowers the head's
+`minTimestamp` back over the older partitions. Once that head is flushed and the
+process restarts, partitions are re-sorted by *min* timestamp, so the stretched head
+sorts before partitions it actually postdates — and a query with a recent `start`
+hit an older-looking partition first, broke out, and never looked at the head.
+Reproduced: a fresh live point was written, a correction for an old point was
+inserted, restart — `Select` from just before the live point returned nothing.
+
+The `break` is now a `continue`: the loop only skips the partition, and still visits
+the rest. The cost is one min/max comparison per remaining partition (a few hundred
+at most) — negligible next to the actual reads.
+
+Duplicate timestamps (the correction next to the original in the closed partition)
+come back oldest partition first, so a caller that keeps the last point per
+timestamp gets the correction.
+
+See `storage.go`'s `Select` for the change and `select_overlap_test.go` for the
+regression test (fails on the previous code, passes now).
+
+## 6. Partitions with an equal start now load in creation order
+
+On startup disk partitions are sorted by `minTimestamp`, and readers that keep the
+last point per timestamp rely on "later in the list = later write". A correction for
+the very first point of a partition lands in a new partition with an identical
+`minTimestamp`; the tie used to resolve in an undefined order, so the stale original
+could sort last and win. Reproduced with 20 closed partitions: three successive
+corrections of the same first point came back as the original value.
+
+Ties are now broken by the partition's creation time from its meta file, so the
+partition flushed later — the one holding the later write — sorts last.
+
+See `storage.go`'s partition sort in `NewStorage` and `createdAt`, and
+`select_overlap_test.go` (fails on the previous code, passes now).
